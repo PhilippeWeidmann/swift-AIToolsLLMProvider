@@ -129,14 +129,53 @@ public struct AIToolsModelExecutor: LanguageModelExecutor {
             }
         }
 
-        let openAIRequest = OpenAICompatibleRequest(model: model.modelId.rawValue, messages: requestMessages)
+        var responseFormat: ResponseFormat?
+
+        if let schema = request.schema {
+            let schemaEncoder = JSONEncoder()
+            let schemaData = try schemaEncoder.encode(schema)
+            let schemaObject = try JSONSerialization.jsonObject(with: schemaData)
+
+            if let schemaDict = schemaObject as? [String: Any] {
+                responseFormat = ResponseFormat(
+                    type: "json_schema",
+                    jsonSchema: JSONSchema(
+                        name: "response",
+                        strict: true,
+                        schema: schemaDict
+                    )
+                )
+            }
+
+            let includeInPrompt = request.contextOptions.includeSchemaInPrompt ?? true
+            if includeInPrompt, let schemaString = String(data: schemaData, encoding: .utf8) {
+                if let firstSystemIndex = requestMessages.firstIndex(where: { $0.role == .system }) {
+                    let existingContent = requestMessages[firstSystemIndex].content ?? ""
+                    requestMessages[firstSystemIndex] = Message(
+                        role: .system,
+                        content: existingContent + "\n\nThe response must conform to the following JSON schema:\n" + schemaString
+                    )
+                } else {
+                    requestMessages.insert(
+                        Message(role: .system, content: "The response must conform to the following JSON schema:\n" + schemaString),
+                        at: 0
+                    )
+                }
+            }
+        }
+
+        let openAIRequest = OpenAICompatibleRequest(
+            model: model.modelId.rawValue,
+            messages: requestMessages,
+            responseFormat: responseFormat
+        )
 
         let url = URL(string: "https://api.infomaniak.com/2/ai/\(configuration.productId)/openai/v1/chat/completions")!
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue("Bearer \(configuration.apiKey)", forHTTPHeaderField: "Authorization")
-        urlRequest.httpBody = try JSONEncoder().encode(openAIRequest)
+        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: openAIRequest.toDictionary())
 
         let (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
         guard let httpResponse = response as? HTTPURLResponse,
